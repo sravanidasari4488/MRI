@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brain-tumor-3d-tract-risk"
+version = "0.1.0"
+description = "Brain Tumor 3D Reconstruction + Tract-Risk pipeline (DICOM → segmentation → volume → tract proximity)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "MRI Project" }]
+dependencies = [
+    "pydicom",
+    "SimpleITK",
+    "monai",
+    "torch",
+    "torchvision",
+    "nibabel",
+    "dicom2nifti",
+    "scikit-image",
+    "trimesh",
+    "plotly",
+    "TractSeg",
+    "dipy",
+    "numpy",
+    "scipy",
+    "pandas",
+    "h5py",
+    "pydantic>=2",
+    "PyYAML",
+    "tensorboard",
+]
+
+[project.optional-dependencies]
+dev = [
+    "jupyter",
+    "ipywidgets",
+    "matplotlib",
+    "pytest",
+]
+skullstrip = [
+    "hd-bet",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"*" = ["py.typed"]

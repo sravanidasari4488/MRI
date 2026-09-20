@@ -1,0 +1,25 @@
+# Brain Tumor 3D Reconstruction + Tract-Risk — project configuration
+# Paths are relative to the project root unless absolute.
+
+paths:
+  # Nested exports like MRI DATA/MRI DATA/*_MR_Study1 are auto-discovered.
+  raw_dicom: data/real_patients
+  brats: data/brats/BraTS2020_training_data/content/data
+  processed: data/processed
+  checkpoints: models/checkpoints
+  # Cached BraTS H5→NIfTI lives at data/processed/brats_nifti (built once).
+
+# Training data flow:
+#   1) Preprocess BraTS  -> data/processed/brats/     -> pretrain
+#   2) Preprocess real   -> data/processed/real_patients/ -> fine-tune
+# Both sources are required for the full training pipeline.
+
+pretrain:
+  batch_size: 1
+  learning_rate: 1.0e-4
+  epochs: 50
+
+finetune:
+  batch_size: 1
+  learning_rate: 1.0e-5
+  epochs: 30

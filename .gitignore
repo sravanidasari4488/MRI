@@ -1,0 +1,44 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Model checkpoints & large artifacts (keep structure via .gitkeep)
+*.pt
+*.pth
+*.ckpt
+*.stl
+*.ply
+*.nii
+*.nii.gz
+
+# Local clinical data — never commit PHI
+data/real_patients/**
+!data/real_patients/.gitkeep
+data/processed/**
+!data/processed/.gitkeep
+data/brats/**
+!data/brats/.gitkeep
+
+# Secrets / env
+.env
+.env.*

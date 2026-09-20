@@ -1,0 +1,42 @@
+# Core medical imaging
+pydicom
+SimpleITK
+nibabel
+dicom2nifti
+
+# Deep learning segmentation (BraTS pretrain + fine-tune)
+monai
+torch
+torchvision
+
+# Geometry / reconstruction
+scikit-image
+trimesh
+
+# Tractography / white-matter tracts
+TractSeg
+dipy
+
+# Numerics & analysis
+numpy
+scipy
+pandas
+h5py
+
+# Config
+pydantic>=2
+PyYAML
+
+# Optional skull stripping (falls back to SimpleITK if missing)
+# hd-bet
+
+# Visualization / logging
+plotly
+tensorboard
+matplotlib
+
+# Optional notebook exploration (install with: pip install -e ".[dev]")
+# jupyter
+# ipywidgets
+# matplotlib
+# pytest
