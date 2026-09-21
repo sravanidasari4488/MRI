@@ -8,10 +8,10 @@ import torch
 from monai.networks.nets import SegResNet, UNet
 from torch import nn
 
-# Input channel order must match stacked NIfTI modalities in ``dataset.py`` /
-# ``h5_to_nifti.MODALITY_ORDER``: FLAIR, T1, T1c, T2.
-IN_CHANNELS = 4
-IN_MODALITIES: tuple[str, ...] = ("flair", "t1", "t1c", "t2")
+# Input channel order must match stacked NIfTI modalities in ``dataset.py``:
+# FLAIR, T1, T2 (no T1c — real patients lack contrast).
+IN_CHANNELS = 3
+IN_MODALITIES: tuple[str, ...] = ("flair", "t1", "t2")
 
 # BraTS *region* heads (overlapping, typically trained with sigmoid + Dice):
 #   0 → ET  enhancing tumor          (original label 4 / remapped 3)
@@ -35,7 +35,7 @@ def build_segresnet(
     dropout_prob: float = 0.2,
 ) -> SegResNet:
     """
-    SegResNet configured for BraTS: 4 MRI channels → 3 region logits.
+    SegResNet configured for BraTS: 3 MRI channels (FLAIR/T1/T2) → 3 region logits.
 
     Use ``sigmoid`` activation (or ``DiceLoss(sigmoid=True)``) when
     ``out_channels == 3`` for overlapping ET / TC / WT targets.
@@ -82,7 +82,7 @@ def build_model(
     architecture:
         ``\"segresnet\"`` (default) or ``\"unet\"``.
     in_channels:
-        Must be 4 for T1 / T1c / T2 / FLAIR (order as stacked in the dataset).
+        Must be 3 for FLAIR / T1 / T2 (order as stacked in the dataset).
     out_channels:
         ``3`` for BraTS region heads (ET, TC, WT). Use ``4`` only if training
         exclusive softmax classes (bg + NCR + ED + ET).

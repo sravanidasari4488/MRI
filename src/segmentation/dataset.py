@@ -23,8 +23,10 @@ from monai.transforms import (
 
 logger = logging.getLogger(__name__)
 
-# Matches ``preprocessing.h5_to_nifti.MODALITY_ORDER`` / on-disk filenames.
-MODALITIES: tuple[str, ...] = ("flair", "t1", "t1c", "t2")
+# Matches on-disk BraTS NIfTI filenames used for training (T1c is present in
+# the cache but intentionally unused so real-patient studies without contrast
+# can share the same 3-channel model).
+MODALITIES: tuple[str, ...] = ("flair", "t1", "t2")
 LABEL_KEY = "label"
 IMAGE_KEY = "image"
 
@@ -46,12 +48,13 @@ def build_brats_data_dicts(
     Each dict has::
 
         {
-          "image": [flair.nii.gz, t1.nii.gz, t1c.nii.gz, t2.nii.gz],
+          "image": [flair.nii.gz, t1.nii.gz, t2.nii.gz],
           "label": mask.nii.gz,
           "case_id": "BraTS20_Training_001",
         }
 
-    ``LoadImaged`` stacks the image list into a multi-channel array.
+    ``t1c.nii.gz`` may still exist on disk from the H5→NIfTI cache; it is
+    ignored so the model matches real-patient studies (no contrast series).
     """
     nifti_root = Path(nifti_root)
     if not nifti_root.is_dir():

@@ -232,9 +232,9 @@ def region_masks_from_batch(
     pred = (probs[0, idx] > 0.5).detach().cpu().numpy().astype(np.uint8)
     gt = (regions_gt[0, idx] > 0.5).detach().cpu().numpy().astype(np.uint8)
 
-    # Prefer T1c / T1 channel for display (index 2 = t1c in FLAIR,T1,T1c,T2)
+    # Prefer T1 channel for display (index 1 in FLAIR, T1, T2)
     img_np = image.detach().cpu().numpy()
-    ch = min(2, img_np.shape[0] - 1)
+    ch = min(1, img_np.shape[0] - 1)
     mri = img_np[ch]
 
     affine = _as_affine(label)

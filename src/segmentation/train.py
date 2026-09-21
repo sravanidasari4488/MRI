@@ -28,7 +28,7 @@ from .model import OUT_REGION_NAMES, build_model, describe_model
 logger = logging.getLogger(__name__)
 
 
-def _default_model(in_channels: int = 4, out_channels: int = 3):
+def _default_model(in_channels: int = 3, out_channels: int = 3):
     return build_model("segresnet", in_channels=in_channels, out_channels=out_channels)
 
 
@@ -351,7 +351,7 @@ def train_brats(
 
     if not data_dicts:
         raise FileNotFoundError(
-            f"No BraTS NIfTI cases with flair/t1/t1c/t2 + mask under {nifti_root}. "
+            f"No BraTS NIfTI cases with flair/t1/t2 + mask under {nifti_root}. "
             "Run preprocessing.h5_to_nifti first (cache at data/processed/brats_nifti)."
         )
 

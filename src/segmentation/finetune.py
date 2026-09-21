@@ -53,7 +53,7 @@ def discover_corrected_cases(
 
     Expected layout (either)::
 
-        corrected_root/<case_id>/{flair,t1,t1c,t2}.nii.gz + mask.nii.gz
+        corrected_root/<case_id>/{flair,t1,t2}.nii.gz + mask.nii.gz
         corrected_root/<case_id>/05_isotropic_1mm/{mod}_1mm.nii.gz
             + pseudo_labels/pseudo_seg.nii.gz   (after manual edit)
 
@@ -265,7 +265,7 @@ def finetune_real_cases(
     data_dicts = discover_corrected_cases(corrected_root)
     if len(data_dicts) < 2:
         raise FileNotFoundError(
-            f"Need at least 2 corrected cases with 4 modalities + mask under "
+            f"Need at least 2 corrected cases with flair/t1/t2 + mask under "
             f"{corrected_root} (found {len(data_dicts)})."
         )
 

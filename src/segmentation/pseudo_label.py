@@ -36,7 +36,7 @@ from .train import list_preprocessed_cases
 logger = logging.getLogger(__name__)
 
 # Preferred scan to open under the label in ITK-SNAP / Slicer.
-REFERENCE_MODALITY = "t1c"
+REFERENCE_MODALITY = "t1"
 
 
 @dataclass
@@ -85,20 +85,21 @@ def _find_modality_nifti(case_dir: Path, modality: str) -> Path | None:
         case_dir / f"{modality}.nii.gz",
         case_dir / f"{modality}_1mm.nii.gz",
     ]
-    # Also accept BraTS-style t1ce alias.
-    if modality == "t1c":
-        candidates[0:0] = [
-            case_dir / "05_isotropic_1mm" / "t1ce_1mm.nii.gz",
-            case_dir / "05_isotropic_1mm" / "t1ce.nii.gz",
-            case_dir / "01_nifti" / "t1ce.nii.gz",
-            case_dir / "t1ce.nii.gz",
-        ]
     for path in candidates:
         if path.is_file():
             return path
     # Fuzzy search inside case_dir.
     hits = sorted(case_dir.rglob(f"*{modality}*.nii*"))
     hits = [p for p in hits if "pseudo" not in p.name.lower() and "seg" not in p.name.lower()]
+    # Avoid picking contrast / t1c files when looking for plain t1.
+    if modality == "t1":
+        hits = [
+            p
+            for p in hits
+            if "t1c" not in p.name.lower()
+            and "t1ce" not in p.name.lower()
+            and "gad" not in p.name.lower()
+        ]
     return hits[0] if hits else None
 
 
@@ -116,7 +117,7 @@ def discover_real_study_modalities(
         path = _find_modality_nifti(case_dir, mod)
         if path is not None:
             found[mod] = path
-    # Need all 4 channels for the BraTS SegResNet.
+    # Need all channels for the SegResNet (FLAIR / T1 / T2).
     if len(found) < len(modalities):
         missing = [m for m in modalities if m not in found]
         logger.debug("Study %s missing modalities: %s", case_dir.name, missing)
@@ -190,7 +191,7 @@ def pseudo_label_study(
         pseudo_et.nii.gz        binary enhancing
         pseudo_tc.nii.gz        binary tumor core
         pseudo_wt.nii.gz        binary whole tumor
-        pseudo_ref_t1c.nii.gz   reference MRI in the same grid (for overlay)
+        pseudo_ref_t1.nii.gz    reference MRI in the same grid (for overlay)
         pseudo_label_meta.json  run metadata
     """
     case_dir = Path(case_dir)
@@ -204,7 +205,7 @@ def pseudo_label_study(
             study_id=study_id,
             status="skipped",
             source_dir=str(case_dir),
-            error="Missing one or more of flair/t1/t1c/t2 NIfTIs",
+            error="Missing one or more of flair/t1/t2 NIfTIs",
         )
 
     if seg_path.is_file() and not overwrite:
@@ -224,7 +225,7 @@ def pseudo_label_study(
     if model is None:
         model, _ = load_model_from_checkpoint(checkpoint, device=device)
 
-    # Stack in dataset channel order: flair, t1, t1c, t2
+    # Stack in dataset channel order: flair, t1, t2
     data = {
         IMAGE_KEY: [str(modalities[m]) for m in MODALITIES],
         "case_id": study_id,
