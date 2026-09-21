@@ -458,6 +458,16 @@ def preprocess_patient_study(
         else:
             logger.warning("No usable %s series under %s", mod, dicom_root)
 
+    if "t1c" not in selected:
+        t1_series = [s for s in series_list if s.inferred_mri_contrast == "t1"]
+        if len(t1_series) >= 2:
+            logger.warning(
+                "Study %s: T1c could not be determined from ContrastBolusAgent / "
+                "name hints among %d T1 series -- continuing without t1c",
+                resolved_study,
+                len(t1_series),
+            )
+
     result = preprocess_nifti_modalities(
         selected,
         output_dir,

@@ -3,9 +3,11 @@
 from .dicom_to_nifti import convert_dicom_series
 from .dicom_loader import (
     classify_modality,
+    contrast_bolus_agent_present,
     group_series_by_uid,
     load_dicom_directory,
     load_dicom_study,
+    refine_t1c_across_study,
 )
 from .bias_correction import n4_bias_correct
 from .skull_strip import skull_strip
@@ -26,6 +28,8 @@ from .h5_to_nifti import convert_brats_h5_directory, resolve_brats_h5_dir
 __all__ = [
     "convert_dicom_series",
     "classify_modality",
+    "contrast_bolus_agent_present",
+    "refine_t1c_across_study",
     "group_series_by_uid",
     "load_dicom_directory",
     "load_dicom_study",

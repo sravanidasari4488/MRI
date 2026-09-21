@@ -20,20 +20,39 @@ logger = logging.getLogger(__name__)
 
 ModalityFolder = Literal["t1", "t1c", "t2", "flair", "other"]
 
-# Ordered rules: first match wins. Patterns are applied to SeriesDescription + ProtocolName.
-_MODALITY_RULES: list[tuple[ModalityFolder, re.Pattern[str]]] = [
-    ("flair", re.compile(r"\bflair\b|fluid[\s_-]*attenuated", re.I)),
-    (
-        "t1c",
-        re.compile(
-            r"t1[\s_-]*(c|ce|gd|gado)|t1.*\bpost\b|\bpost\b.*t1|"
-            r"[\s_+]c\+|\+c\b|post[\s_-]*contrast|\bcontrast\b|\bgad+",
-            re.I,
-        ),
-    ),
-    ("t1", re.compile(r"\bt1\b|mprage|spgr|bravo", re.I)),
-    ("t2", re.compile(r"\bt2\b(?![\s_-]*flair)|t2[_\s-]?w|space|cube", re.I)),
-]
+# Ordered rules: first match wins on SeriesDescription + ProtocolName.
+# FLAIR must come before generic T2 — vendor names often include "T2W_FLAIR".
+# T1 matches "T1W_*" / "eT1W_*" via ``t1w`` (``\bt1\b`` fails there).
+_FLAIR_RE = re.compile(
+    r"flair|fluid[\s_-]*attenuated",
+    re.I,
+)
+_T1C_NAME_RE = re.compile(
+    r"t1(?:w)?[\s_-]*(?:c|ce|gd|gado)|"
+    r"t1(?:w)?.{0,32}(?:post|\+c|c\+|contrast|gadolinium|\bgd\b)|"
+    r"(?:post|\+c|c\+|contrast|gadolinium|\bgd\b).{0,32}t1(?:w)?|"
+    r"post[\s_-]*contrast",
+    re.I,
+)
+_T1_RE = re.compile(
+    r"t1w(?:[\s_-]?ir)?|"  # T1W_SE, eT1W_SE, T1W_IR, t1w_ir
+    r"t1[\s_-]ir|"  # t1_ir
+    r"(?<![a-z0-9])t1(?![a-z0-9])|"  # bare t1 (not t1c / t1w — those handled above)
+    r"mprage|spgr|bravo|fspgr|mp[\s_-]?rage",
+    re.I,
+)
+_T2_RE = re.compile(
+    r"t2w|"  # T2W_TSE, eT2W_TSE (FLAIR already handled above)
+    r"(?<![a-z0-9])t2(?![a-z0-9w])|"
+    r"(?<![a-z0-9])(?:space|cube)(?![a-z0-9])",
+    re.I,
+)
+
+# Standalone contrast-agent name hints (with ContrastBolusAgent → promote T1 → T1c).
+_CONTRAST_HINT_RE = re.compile(
+    r"(?:^|[^a-z0-9])(?:post|\+c|c\+|gd|gado|gadolinium|contrast)(?:[^a-z0-9]|$)",
+    re.I,
+)
 
 
 @dataclass
@@ -60,20 +79,129 @@ class SeriesMeta:
     nifti_path: str | None = None
     dicom_files: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    contrast_bolus_agent: str | None = None
+    contrast_evidence: list[str] = field(default_factory=list)
 
     def to_json_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def classify_modality(series_description: str | None, protocol_name: str | None) -> ModalityFolder:
-    """Map SeriesDescription / ProtocolName to t1, t1c, t2, flair, or other."""
-    text = " ".join(x for x in (series_description, protocol_name) if x).strip()
-    if not text:
+def series_text(*parts: str | None) -> str:
+    """Join non-empty description / protocol strings for modality matching."""
+    return " ".join(x for x in parts if x).strip()
+
+
+def contrast_bolus_agent_present(datasets: Iterable[Dataset]) -> tuple[bool, str | None]:
+    """
+    Return whether any instance has a non-empty ``ContrastBolusAgent`` (0018,0010).
+
+    Also accepts common related tags when the primary agent string is empty.
+    """
+    related_keywords = (
+        "ContrastBolusAgent",
+        "ContrastBolusAgentSequence",
+        "ContrastAgent",
+        "ContrastBolusVolume",
+        "ContrastBolusTotalDose",
+    )
+    for ds in datasets:
+        for kw in related_keywords:
+            if not hasattr(ds, kw):
+                continue
+            value = getattr(ds, kw, None)
+            if value is None:
+                continue
+            # Sequence / multi-value → treat presence as positive if any element exists.
+            if kw.endswith("Sequence"):
+                try:
+                    if len(value) > 0:
+                        return True, f"{kw}(len={len(value)})"
+                except TypeError:
+                    return True, kw
+                continue
+            text = str(value).strip()
+            if text and text.lower() not in {"none", "n/a", "na", "0", "0.0"}:
+                return True, text
+    return False, None
+
+
+def name_suggests_contrast(text: str) -> bool:
+    """True if series/protocol naming hints at post-contrast imaging."""
+    return bool(text and _CONTRAST_HINT_RE.search(text))
+
+
+def classify_modality(
+    series_description: str | None,
+    protocol_name: str | None,
+    *,
+    contrast_bolus_agent: str | None = None,
+    has_contrast_bolus: bool | None = None,
+) -> ModalityFolder:
+    """
+    Map SeriesDescription / ProtocolName (+ optional contrast tags) to a folder.
+
+    Order: **FLAIR → T1c → T1 → T2** so that names like ``eT2W_FLAIR`` become
+    ``flair`` rather than ``t2``. T1c uses name hints and/or DICOM contrast
+    bolus evidence to promote a T1-like series.
+    """
+    text = series_text(series_description, protocol_name)
+    if not text and not (has_contrast_bolus or contrast_bolus_agent):
         return "other"
-    for folder, pattern in _MODALITY_RULES:
-        if pattern.search(text):
-            return folder
+
+    # Explicit FLAIR before any T2 rule (substring — underscores are word chars).
+    if text and _FLAIR_RE.search(text):
+        return "flair"
+
+    bolus = bool(has_contrast_bolus) or bool(
+        contrast_bolus_agent and str(contrast_bolus_agent).strip()
+    )
+    name_contrast = name_suggests_contrast(text) if text else False
+    name_t1c = bool(text and _T1C_NAME_RE.search(text))
+    name_t1 = bool(text and _T1_RE.search(text))
+
+    # Post-contrast T1: name-based t1c, or T1-like + (bolus tag or contrast hint).
+    if name_t1c or (name_t1 and (bolus or name_contrast)):
+        return "t1c"
+    if name_t1:
+        return "t1"
+    if text and _T2_RE.search(text):
+        return "t2"
     return "other"
+
+
+def refine_t1c_across_study(series_list: list[SeriesMeta]) -> list[SeriesMeta]:
+    """
+    Study-level T1c resolution.
+
+    If multiple T1-family series exist and none were classified as ``t1c``
+    (no ContrastBolusAgent / name hint), log a warning rather than silently
+    promoting one to T1c.
+    """
+    t1_family = [
+        s
+        for s in series_list
+        if s.inferred_mri_contrast in {"t1", "t1c"}
+        or (s.series_description and _T1_RE.search(s.series_description))
+        or (s.protocol_name and _T1_RE.search(s.protocol_name))
+    ]
+    t1c = [s for s in series_list if s.inferred_mri_contrast == "t1c"]
+    t1_only = [s for s in series_list if s.inferred_mri_contrast == "t1"]
+
+    if len(t1_family) >= 2 and not t1c and t1_only:
+        descs = [s.series_description or s.series_instance_uid[:12] for s in t1_only]
+        logger.warning(
+            "T1c could not be determined: %d T1 series found (%s) but none have "
+            "ContrastBolusAgent metadata or post-contrast name hints "
+            "(post/+c/gd/contrast). Leaving them as t1 -- do not silently pick one.",
+            len(t1_only),
+            ", ".join(repr(d) for d in descs),
+        )
+        for s in t1_only:
+            s.notes.append(
+                "T1c undetermined: no ContrastBolusAgent / contrast name hint "
+                "among multiple T1 series"
+            )
+    return series_list
 
 
 def _as_float_list(value: Any) -> list[float] | None:
@@ -171,7 +299,21 @@ def extract_series_meta(
     path0, ds = members_sorted[0]
     desc = _safe_str(ds, "SeriesDescription")
     protocol = _safe_str(ds, "ProtocolName")
-    contrast = classify_modality(desc, protocol)
+    datasets = [m[1] for m in members_sorted]
+    has_bolus, bolus_value = contrast_bolus_agent_present(datasets)
+    evidence: list[str] = []
+    if has_bolus and bolus_value:
+        evidence.append(f"ContrastBolusAgent={bolus_value!r}")
+    text = series_text(desc, protocol)
+    if name_suggests_contrast(text):
+        evidence.append("name_hint")
+
+    contrast = classify_modality(
+        desc,
+        protocol,
+        contrast_bolus_agent=bolus_value,
+        has_contrast_bolus=has_bolus,
+    )
 
     meta = SeriesMeta(
         series_instance_uid=uid,
@@ -191,6 +333,8 @@ def extract_series_meta(
         columns=int(ds.Columns) if getattr(ds, "Columns", None) is not None else None,
         num_instances=len(members_sorted),
         dicom_files=[str(p) for p, _ in members_sorted],
+        contrast_bolus_agent=bolus_value if has_bolus else None,
+        contrast_evidence=evidence,
     )
 
     if meta.pixel_spacing is None:
@@ -202,17 +346,17 @@ def extract_series_meta(
 
     logger.info(
         "Series %s | contrast=%s | desc=%r | protocol=%r | n=%d | "
-        "PixelSpacing=%s SliceThickness=%s IOP=%s",
+        "bolus=%s | PixelSpacing=%s SliceThickness=%s IOP=%s",
         uid[:16] + "…",
         contrast,
         desc,
         protocol,
         meta.num_instances,
+        meta.contrast_bolus_agent,
         meta.pixel_spacing,
         meta.slice_thickness,
         meta.image_orientation_patient,
     )
-    # Avoid unused-var lint if path0 only used for potential future logging.
     _ = path0
     return meta
 
@@ -380,8 +524,14 @@ def load_dicom_study(
     results: list[SeriesMeta] = []
     modality_counters: dict[str, int] = defaultdict(int)
 
+    # Extract metadata for every series first so study-level T1c refinement
+    # can run before NIfTI paths are assigned to modality folders.
+    pending: list[tuple[str, list[tuple[Path, Dataset]], SeriesMeta]] = []
     for uid, members in groups.items():
-        meta = extract_series_meta(uid, members)
+        pending.append((uid, members, extract_series_meta(uid, members)))
+    refine_t1c_across_study([meta for _, _, meta in pending])
+
+    for uid, members, meta in pending:
         if meta.num_instances < min_instances:
             meta.notes.append(f"Skipped: fewer than {min_instances} instances")
             logger.warning(
