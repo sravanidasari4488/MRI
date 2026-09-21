@@ -221,6 +221,77 @@ def save_checkpoint(
     )
 
 
+def save_resume_checkpoint(
+    path: Path,
+    *,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: CosineAnnealingLR,
+    scaler: GradScaler | None,
+    epoch: int,
+    best_metric: float,
+    use_amp: bool,
+) -> None:
+    """
+    Write a full training-resume snapshot (``checkpoint.pt``).
+
+    Separate from ``best_model.pt`` / ``last_model.pt``, which remain the
+    inference-oriented artifacts produced by :func:`save_checkpoint`.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    blob: dict[str, Any] = {
+        "epoch": int(epoch),
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "best_metric": float(best_metric),
+    }
+    if use_amp and scaler is not None:
+        blob["scaler_state_dict"] = scaler.state_dict()
+    torch.save(blob, path)
+
+
+def load_resume_checkpoint(
+    path: Path,
+    *,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: CosineAnnealingLR,
+    scaler: GradScaler | None,
+    device: torch.device,
+) -> tuple[int, float]:
+    """
+    Restore model / optimizer / scheduler / scaler from ``checkpoint.pt``.
+
+    Returns ``(start_epoch, best_metric)`` where ``start_epoch`` is the next
+    epoch to run (``saved_epoch + 1``).
+    """
+    blob = torch.load(path, map_location=device, weights_only=False)
+    if not isinstance(blob, dict):
+        raise ValueError(f"Resume checkpoint is not a dict: {path}")
+
+    model_state = blob.get("model_state_dict", blob.get("model_state"))
+    optim_state = blob.get("optimizer_state_dict", blob.get("optimizer_state"))
+    sched_state = blob.get("scheduler_state_dict", blob.get("scheduler_state"))
+    if model_state is None:
+        raise KeyError(f"No model_state_dict in resume checkpoint: {path}")
+
+    model.load_state_dict(model_state)
+    if optim_state is not None:
+        optimizer.load_state_dict(optim_state)
+    if sched_state is not None:
+        scheduler.load_state_dict(sched_state)
+
+    scaler_state = blob.get("scaler_state_dict")
+    if scaler is not None and scaler_state is not None:
+        scaler.load_state_dict(scaler_state)
+
+    completed_epoch = int(blob.get("epoch", 0))
+    best_metric = float(blob.get("best_metric", -1.0))
+    start_epoch = completed_epoch + 1
+    return start_epoch, best_metric
+
+
 def train_brats(
     data_dir: str | Path,
     output_dir: str | Path,
@@ -235,6 +306,7 @@ def train_brats(
     device: str | None = None,
     amp: bool | None = None,
     log_dir: str | Path | None = None,
+    resume_from: str | Path | None = None,
 ) -> Path:
     """
     Pretrain SegResNet on cached BraTS NIfTI with a full MONAI training loop.
@@ -243,8 +315,10 @@ def train_brats(
     - Optim: Adam + CosineAnnealingLR
     - AMP mixed precision when CUDA is available
     - Saves ``best_model.pt`` on best validation mean Dice
+    - Saves resumable ``checkpoint.pt`` every epoch
     - TensorBoard logs under ``output_dir/tb`` (or ``log_dir``)
     - Cases split **80/20** train/val via :func:`split_train_val`
+    - Optional ``resume_from`` path to a prior ``checkpoint.pt``
     """
     data_dir = Path(data_dir)
     output_dir = Path(output_dir)
@@ -311,8 +385,10 @@ def train_brats(
     writer = SummaryWriter(log_dir=str(log_dir))
 
     best_metric = -1.0
+    start_epoch = 1
     best_path = output_dir / "best_model.pt"
     last_path = output_dir / "last_model.pt"
+    resume_path = output_dir / "checkpoint.pt"
     meta = {
         "stage": "brats_pretrain",
         "data_dir": str(data_dir),
@@ -328,9 +404,40 @@ def train_brats(
         "device": device_str,
     }
 
+    if resume_from is not None:
+        resume_file = Path(resume_from)
+        if resume_file.is_file():
+            start_epoch, best_metric = load_resume_checkpoint(
+                resume_file,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                scaler=scaler if use_amp else None,
+                device=device_t,
+            )
+            logger.info(
+                "Resuming training from epoch %d, best_metric=%.4f (loaded %s)",
+                start_epoch,
+                best_metric,
+                resume_file,
+            )
+            if start_epoch > max_epochs:
+                logger.warning(
+                    "Resume start_epoch=%d exceeds max_epochs=%d — nothing to train",
+                    start_epoch,
+                    max_epochs,
+                )
+        else:
+            logger.warning(
+                "Resume checkpoint not found at %s — starting fresh from epoch 0",
+                resume_file,
+            )
+
     logger.info(
-        "Starting BraTS training: epochs=%d batch=%d lr=%s device=%s amp=%s train=%d val=%d",
+        "Starting BraTS training: epochs=%d (from %d) batch=%d lr=%s device=%s "
+        "amp=%s train=%d val=%d",
         max_epochs,
+        start_epoch,
         batch_size,
         learning_rate,
         device_str,
@@ -339,7 +446,7 @@ def train_brats(
         len(val_files),
     )
 
-    for epoch in range(1, max_epochs + 1):
+    for epoch in range(start_epoch, max_epochs + 1):
         t0 = time.perf_counter()
         train_loss = train_one_epoch(
             model,
@@ -406,6 +513,18 @@ def train_brats(
                 meta=meta_best,
             )
             logger.info("New best val Dice=%.4f — saved %s", best_metric, best_path)
+
+        # Full resumable snapshot every epoch (in addition to best/last).
+        save_resume_checkpoint(
+            resume_path,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=scaler if use_amp else None,
+            epoch=epoch,
+            best_metric=best_metric,
+            use_amp=use_amp,
+        )
 
     writer.close()
     if not best_path.is_file():
@@ -572,6 +691,11 @@ if __name__ == "__main__":
     p.add_argument("--lr", type=float, default=default_lr)
     p.add_argument("--val-ratio", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--resume-from",
+        default=None,
+        help="Path to checkpoint.pt to resume training (model/optim/scheduler/scaler)",
+    )
     args = p.parse_args()
 
     train_brats(
@@ -582,4 +706,5 @@ if __name__ == "__main__":
         learning_rate=args.lr,
         val_ratio=args.val_ratio,
         seed=args.seed,
+        resume_from=args.resume_from,
     )
