@@ -301,12 +301,13 @@ def train_brats(
     learning_rate: float = 1e-4,
     val_ratio: float = 0.2,
     seed: int = 42,
-    num_workers: int = 0,
+    num_workers: int = 4,
     spatial_size: tuple[int, int, int] = (96, 96, 96),
     device: str | None = None,
     amp: bool | None = None,
     log_dir: str | Path | None = None,
     resume_from: str | Path | None = None,
+    pin_memory: bool | None = None,
 ) -> Path:
     """
     Pretrain SegResNet on cached BraTS NIfTI with a full MONAI training loop.
@@ -335,6 +336,10 @@ def train_brats(
     if use_amp and device_t.type != "cuda":
         logger.warning("AMP requested but device=%s — disabling AMP", device_str)
         use_amp = False
+
+    use_pin_memory = bool(pin_memory) if pin_memory is not None else device_t.type == "cuda"
+    if use_pin_memory and device_t.type != "cuda":
+        use_pin_memory = False
 
     # Prefer converted NIfTI layout; fall back to scanning data_dir itself.
     nifti_root = data_dir
@@ -367,6 +372,7 @@ def train_brats(
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
+        pin_memory=use_pin_memory,
         collate_fn=list_data_collate,
     )
     val_loader = DataLoader(
@@ -374,6 +380,7 @@ def train_brats(
         batch_size=1,
         shuffle=False,
         num_workers=num_workers,
+        pin_memory=use_pin_memory,
         collate_fn=list_data_collate,
     )
 
@@ -435,13 +442,15 @@ def train_brats(
 
     logger.info(
         "Starting BraTS training: epochs=%d (from %d) batch=%d lr=%s device=%s "
-        "amp=%s train=%d val=%d",
+        "amp=%s num_workers=%d pin_memory=%s train=%d val=%d",
         max_epochs,
         start_epoch,
         batch_size,
         learning_rate,
         device_str,
         use_amp,
+        num_workers,
+        use_pin_memory,
         len(train_files),
         len(val_files),
     )
@@ -692,6 +701,24 @@ if __name__ == "__main__":
     p.add_argument("--val-ratio", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+        help="DataLoader worker processes (default: 4; use 0 to disable)",
+    )
+    p.add_argument(
+        "--pin-memory",
+        action="store_true",
+        default=True,
+        help="Pin host memory for faster CUDA transfers (default: on; ignored on CPU)",
+    )
+    p.add_argument(
+        "--no-pin-memory",
+        action="store_false",
+        dest="pin_memory",
+        help="Disable pin_memory even on CUDA",
+    )
+    p.add_argument(
         "--resume-from",
         default=None,
         help="Path to checkpoint.pt to resume training (model/optim/scheduler/scaler)",
@@ -706,5 +733,7 @@ if __name__ == "__main__":
         learning_rate=args.lr,
         val_ratio=args.val_ratio,
         seed=args.seed,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_memory,
         resume_from=args.resume_from,
     )
