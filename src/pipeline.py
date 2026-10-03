@@ -178,6 +178,49 @@ def _stage_segmentation(
     }
 
 
+def _brain_mask_on_seg_grid(case_dir: Path, seg_path: Path, out_path: Path) -> Path | None:
+    """
+    Write a brain mask resampled onto the segmentation's voxel grid.
+
+    Uses the T1 skull-strip mask (T1 is the registration target, so it shares
+    physical space with the segmentation) and resamples it with nearest
+    neighbour in world coordinates. Falls back to the non-zero voxels of
+    ``pseudo_ref_t1`` (the skull-stripped T1 saved on the seg grid).
+    """
+    import SimpleITK as sitk
+
+    ref = sitk.ReadImage(str(seg_path))
+    t1_mask = case_dir / "03_skull_stripped" / "t1_brainmask.nii.gz"
+    if t1_mask.is_file():
+        mask = sitk.ReadImage(str(t1_mask))
+        source = t1_mask.name
+    else:
+        ref_t1 = seg_path.parent / "pseudo_ref_t1.nii.gz"
+        if not ref_t1.is_file():
+            logger.warning("No T1 brain mask or pseudo_ref_t1 for %s; brain mesh skipped", case_dir.name)
+            return None
+        mask = sitk.Cast(sitk.ReadImage(str(ref_t1)) != 0, sitk.sitkUInt8)
+        source = ref_t1.name
+
+    on_grid = sitk.Resample(
+        sitk.Cast(mask > 0, sitk.sitkUInt8),
+        ref,
+        sitk.Transform(),
+        sitk.sitkNearestNeighbor,
+        0,
+        sitk.sitkUInt8,
+    )
+    # Fill small holes so the surface is a clean shell.
+    on_grid = sitk.BinaryFillhole(on_grid)
+    if sitk.GetArrayViewFromImage(on_grid).sum() == 0:
+        logger.warning("Brain mask from %s is empty on the seg grid — grids may not overlap", source)
+        return None
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    sitk.WriteImage(on_grid, str(out_path))
+    logger.info("Brain mask (%s) resampled onto seg grid → %s", source, out_path)
+    return out_path
+
+
 def _stage_reconstruction(
     study_id: str,
     seg_path: Path,
@@ -216,21 +259,18 @@ def _stage_reconstruction(
         except Exception as exc:  # noqa: BLE001
             logger.warning("Mesh for region %s failed: %s", region, exc)
 
-    # Optional brain surface from skull-strip mask.
+    # Brain surface, built on the SAME grid as the tumor segmentation so the
+    # two meshes share one coordinate frame.
     brain_mesh_path = None
     case_dir = seg_path.parent.parent if seg_path.parent.name == "pseudo_labels" else seg_path.parent
-    brain_candidates = list((case_dir / "03_skull_stripped").glob("*_mask*.nii*")) + list(
-        (case_dir / "03_skull_stripped").glob("*brain_mask*.nii*")
-    )
-    if not brain_candidates:
-        brain_candidates = list(case_dir.rglob("*brain_mask*.nii*"))
-    if brain_candidates:
-        try:
+    try:
+        brain_on_seg = _brain_mask_on_seg_grid(case_dir, seg_path, mesh_dir / "brain_mask_on_seg_grid.nii.gz")
+        if brain_on_seg is not None:
             brain_mesh_path = mesh_dir / f"{study_id}_brain.obj"
-            mask_to_mesh(brain_candidates[0], brain_mesh_path, label=None, step_size=2)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Brain mesh skipped: %s", exc)
-            brain_mesh_path = None
+            mask_to_mesh(brain_on_seg, brain_mesh_path, label=None, step_size=2)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Brain mesh skipped: %s", exc)
+        brain_mesh_path = None
 
     return {
         "status": "ok",

@@ -1,7 +1,9 @@
 """Marching-cubes surface extraction from tumor segmentation masks.
 
-Vertices are scaled into physical millimeters by passing the NIfTI header
-voxel spacing into ``skimage.measure.marching_cubes(..., spacing=...)``.
+``mask_to_mesh`` places vertices in world millimeters using the full NIfTI
+affine (origin, orientation and spacing), so meshes built from different
+grids overlay correctly. ``mask_array_to_mesh`` without an affine keeps the
+old behavior (spacing only, grid corner at 0) for size-only measurements.
 Meshes are written as ``.obj`` or ``.stl`` via trimesh.
 """
 
@@ -59,9 +61,16 @@ def mask_array_to_mesh(
     level: float = 0.5,
     step_size: int = 1,
     allow_degenerate: bool = False,
+    affine: np.ndarray | None = None,
 ):
     """
     Run marching cubes on an in-memory mask with explicit voxel spacing (mm).
+
+    If ``affine`` (4x4 voxel→world from the NIfTI) is given, vertices are
+    placed in **world millimeters** (origin + orientation + spacing applied),
+    so meshes from different grids line up in one scene. ``spacing_mm`` is
+    then ignored for placement. Without ``affine``, vertices start at (0,0,0)
+    of the voxel grid — fine for size measurements, wrong for overlays.
 
     Parameters
     ----------
@@ -96,25 +105,49 @@ def mask_array_to_mesh(
     if not np.any(binary):
         raise ValueError(f"Empty mask for label={label} (no foreground voxels)")
 
-    # Float volume so ``level=0.5`` sits between background (0) and foreground (1).
-    verts, faces, normals, _values = marching_cubes(
-        binary.astype(np.float32),
-        level=level,
-        spacing=spacing,
-        step_size=step_size,
-        allow_degenerate=allow_degenerate,
-    )
-    mesh = trimesh.Trimesh(
-        vertices=verts,
-        faces=faces,
-        vertex_normals=normals,
-        process=True,
-    )
+    if affine is not None:
+        from nibabel.affines import apply_affine
+
+        affine = np.asarray(affine, dtype=np.float64)
+        if affine.shape != (4, 4):
+            raise ValueError(f"affine must be 4x4, got {affine.shape}")
+        # Pad by one voxel so surfaces touching the volume edge stay closed;
+        # shift back by -1 in index space before applying the affine.
+        padded = np.pad(binary, 1, mode="constant", constant_values=False)
+        verts, faces, _normals, _values = marching_cubes(
+            padded.astype(np.float32),
+            level=level,
+            spacing=(1.0, 1.0, 1.0),
+            step_size=step_size,
+            allow_degenerate=allow_degenerate,
+        )
+        verts = apply_affine(affine, verts - 1.0)
+        # A mirroring affine (negative determinant) flips triangle winding.
+        if np.linalg.det(affine[:3, :3]) < 0:
+            faces = faces[:, ::-1]
+        mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=True)
+        placement = "world mm (affine)"
+    else:
+        # Float volume so ``level=0.5`` sits between background (0) and foreground (1).
+        verts, faces, normals, _values = marching_cubes(
+            binary.astype(np.float32),
+            level=level,
+            spacing=spacing,
+            step_size=step_size,
+            allow_degenerate=allow_degenerate,
+        )
+        mesh = trimesh.Trimesh(
+            vertices=verts,
+            faces=faces,
+            vertex_normals=normals,
+            process=True,
+        )
+        placement = "voxel-grid mm (no affine)"
     logger.info(
-        "Marching cubes: %d verts, %d faces, spacing_mm=%s, bbox_mm=%s",
+        "Marching cubes: %d verts, %d faces, placement=%s, bbox_mm=%s",
         len(mesh.vertices),
         len(mesh.faces),
-        spacing,
+        placement,
         np.round(mesh.bounds, 2).tolist(),
     )
     return mesh
@@ -193,12 +226,15 @@ def mask_to_mesh(
         label,
     )
 
+    # Pass the full affine so the mesh sits at its true world position —
+    # otherwise brain and tumor meshes from different grids don't line up.
     mesh = mask_array_to_mesh(
         data,
         spacing,
         label=label,
         level=level,
         step_size=step_size,
+        affine=img.affine,
     )
 
     if output_mesh is not None:
