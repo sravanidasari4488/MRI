@@ -28,7 +28,13 @@ def load_model_from_checkpoint(
     device: torch.device,
     architecture: str = "segresnet",
 ) -> tuple[torch.nn.Module, dict[str, Any]]:
-    """Load model weights from a training checkpoint (``best_model.pt``)."""
+    """Load model weights from a training checkpoint (``best_model.pt``).
+
+    Skips any tensors whose shape no longer matches the current model
+    (e.g. ``convInit`` when the input-channel count changed, such as after
+    dropping T1c) rather than failing outright, so the rest of the
+    pretrained weights still transfer.
+    """
     checkpoint = Path(checkpoint)
     if not checkpoint.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
@@ -40,14 +46,32 @@ def load_model_from_checkpoint(
 
     model = build_model(arch if arch in {"segresnet", "unet"} else "segresnet")
     state = blob["model_state"] if isinstance(blob, dict) and "model_state" in blob else blob
-    model.load_state_dict(state)
+
+    model_sd = model.state_dict()
+    compatible = {}
+    skipped = []
+    for key, tensor in state.items():
+        if key in model_sd and model_sd[key].shape == tensor.shape:
+            compatible[key] = tensor
+        else:
+            skipped.append(key)
+
+    missing, unexpected = model.load_state_dict(compatible, strict=False)
+    if skipped:
+        logger.warning(
+            "Skipped %d mismatched checkpoint tensors (will train fresh): %s",
+            len(skipped),
+            skipped,
+        )
     model.to(device)
     model.eval()
     logger.info(
-        "Loaded checkpoint %s (epoch=%s best_metric=%s)",
+        "Loaded checkpoint %s (epoch=%s best_metric=%s) — %d/%d tensors matched",
         checkpoint,
         blob.get("epoch") if isinstance(blob, dict) else "?",
         blob.get("best_metric") if isinstance(blob, dict) else "?",
+        len(compatible),
+        len(state),
     )
     return model, meta if isinstance(meta, dict) else {}
 
